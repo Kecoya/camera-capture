@@ -125,8 +125,74 @@ def main():
         folder_path = os.path.dirname(__file__)
         os.startfile(folder_path)
 
+    def manage_startup():
+        """管理开机启动设置"""
+        try:
+            # 导入CameraCapture类以使用其自启动方法
+            sys.path.append(os.path.dirname(__file__))
+            from camera_capture import CameraCapture
+
+            capture_tool = CameraCapture()
+
+            # 创建子窗口
+            startup_window = tk.Toplevel(root)
+            startup_window.title("开机启动设置")
+            startup_window.geometry("400x250")
+            startup_window.resizable(False, False)
+            startup_window.transient(root)
+            startup_window.grab_set()
+
+            # 获取当前状态
+            is_enabled = capture_tool.is_startup_enabled()
+
+            # 状态显示
+            status_frame = ttk.LabelFrame(startup_window, text="当前状态")
+            status_frame.pack(fill='x', padx=20, pady=20)
+
+            status_text = f"开机启动: {'已启用' if is_enabled else '已禁用'}"
+            ttk.Label(status_frame, text=status_text, font=("Arial", 11)).pack(padx=10, pady=10)
+
+            # 选项
+            option_frame = ttk.LabelFrame(startup_window, text="启动选项")
+            option_frame.pack(fill='x', padx=20, pady=10)
+
+            hidden_var = tk.BooleanVar(value=True)
+            ttk.Radiobutton(option_frame, text="隐藏模式启动（推荐）", variable=hidden_var, value=True).pack(anchor='w', padx=10, pady=5)
+            ttk.Radiobutton(option_frame, text="显示窗口启动", variable=hidden_var, value=False).pack(anchor='w', padx=10, pady=5)
+
+            # 按钮
+            button_frame = ttk.Frame(startup_window)
+            button_frame.pack(pady=20)
+
+            def apply_startup():
+                """应用启动设置"""
+                if is_enabled:
+                    # 禁用启动
+                    if capture_tool.disable_startup():
+                        messagebox.showinfo("成功", "开机启动已禁用")
+                        startup_window.destroy()
+                    else:
+                        messagebox.showerror("错误", "禁用开机启动失败")
+                else:
+                    # 启用启动
+                    if capture_tool.enable_startup(hidden=hidden_var.get()):
+                        mode_text = "隐藏模式" if hidden_var.get() else "可见模式"
+                        messagebox.showinfo("成功", f"开机启动已启用（{mode_text}）")
+                        startup_window.destroy()
+                    else:
+                        messagebox.showerror("错误", "启用开机启动失败")
+
+            ttk.Button(button_frame, text="应用设置", command=apply_startup, width=15).pack(side='left', padx=5)
+            ttk.Button(button_frame, text="取消", command=startup_window.destroy, width=15).pack(side='left', padx=5)
+
+        except ImportError:
+            messagebox.showerror("错误", "无法导入camera_capture模块")
+        except Exception as e:
+            messagebox.showerror("错误", f"管理开机启动失败：{e}")
+
     ttk.Button(button_frame, text="安装依赖包", command=install_dependencies).pack(side='left', padx=5)
     ttk.Button(button_frame, text="创建桌面快捷方式", command=create_shortcut).pack(side='left', padx=5)
+    ttk.Button(button_frame, text="开机启动设置", command=manage_startup).pack(side='left', padx=5)
     ttk.Button(button_frame, text="打开程序文件夹", command=open_folder).pack(side='left', padx=5)
 
     # 运行按钮

@@ -288,7 +288,7 @@ python camera_capture.py --create-service
    ```bash
    python camera_capture.py --create-service
    ```
-2. 将生成的 `start_camera_capture_hidden.vbs` 复制到启动文件夹：
+2. 将生成的 `start_camera_capture_hidden.bat` 复制到启动文件夹：
    - 按 `Win + R`
    - 输入 `shell:startup`
    - 将文件粘贴到打开的文件夹

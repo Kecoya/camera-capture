@@ -21,7 +21,8 @@ from datetime import datetime, time as dt_time, timedelta
 import platform
 import subprocess
 import signal
-import winreg
+import win32com.client
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import pystray
@@ -711,47 +712,79 @@ WantedBy=multi-user.target
             return False
 
     def create_windows_service(self):
-        """创建Windows服务脚本"""
+        """创建Windows启动脚本"""
+        import ctypes
+
+        # 获取Python可执行文件的路径
+        python_exe = sys.executable
+        script_path = os.path.abspath(__file__)
+
+        # 查找pythonw.exe（无窗口版本）
+        pythonw_exe = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
+
+        # 检查是否存在pythonw.exe
+        use_pythonw = os.path.exists(pythonw_exe)
+
+        # 创建批处理文件 - 可见启动
         bat_content = f"""@echo off
 echo Starting Camera Capture Service...
-cd /d "{os.getcwd()}"
-"{sys.executable}" "{os.path.abspath(__file__)}" --config "{os.path.abspath(self.config_file)}"
-pause
+cd /d "{os.path.dirname(script_path)}"
+"{python_exe}" "{script_path}" --config "{os.path.abspath(self.config_file)}"
+if errorlevel 1 pause
 """
 
-        vbs_content = f"""Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run chr(34) & "{os.getcwd()}\\start_camera_capture.bat" & chr(34), 0
-Set WshShell = Nothing
+        # 创建批处理文件 - 隐藏启动（如果pythonw可用）
+        if use_pythonw:
+            hidden_bat_content = f"""@echo off
+cd /d "{os.path.dirname(script_path)}"
+"{pythonw_exe}" "{script_path}" --hidden --config "{os.path.abspath(self.config_file)}"
+"""
+        else:
+            hidden_bat_content = f"""@echo off
+cd /d "{os.path.dirname(script_path)}"
+start /B "" "{python_exe}" "{script_path}" --hidden --config "{os.path.abspath(self.config_file)}"
 """
 
         try:
-            with open("start_camera_capture.bat", 'w') as f:
+            with open("start_camera_capture.bat", 'w', encoding='utf-8') as f:
                 f.write(bat_content)
 
-            with open("start_camera_capture_hidden.vbs", 'w') as f:
-                f.write(vbs_content)
+            with open("start_camera_capture_hidden.bat", 'w', encoding='utf-8') as f:
+                f.write(hidden_bat_content)
 
-            print(f"Windows服务脚本已创建：")
+            print(f"Windows启动脚本已创建：")
             print("  start_camera_capture.bat - 可见窗口启动")
-            print("  start_camera_capture_hidden.vbs - 隐藏窗口启动")
-            print("\n要开机自启动，请：")
+            print("  start_camera_capture_hidden.bat - 后台启动")
+
+            if use_pythonw:
+                print("    （使用pythonw.exe实现无窗口运行）")
+            else:
+                print("    （使用start /B命令实现后台运行）")
+
+            print("\n要设置开机自启动，建议：")
+            print("1. 运行程序并打开配置窗口")
+            print("2. 在'启动设置'选项卡中勾选'开机自动启动'")
+            print("3. 选择启动模式（隐藏或可见）")
+            print("\n或手动设置：")
             print("1. Win+R 打开运行对话框")
             print("2. 输入 shell:startup 并回车")
-            print("3. 将 start_camera_capture_hidden.vbs 复制到启动文件夹")
+            print("3. 将 start_camera_capture_hidden.bat 复制到启动文件夹")
+
             return True
         except Exception as e:
-            print(f"创建服务文件失败：{e}")
+            print(f"创建启动脚本失败：{e}")
             return False
 
     def is_windows(self):
         """检查是否为Windows系统"""
         return platform.system().lower() == "windows"
 
-    def get_startup_registry_key(self):
-        """获取Windows启动注册表路径"""
-        return winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                              r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-                              0, winreg.KEY_ALL_ACCESS)
+    def get_startup_shortcut_path(self):
+        """获取Windows启动文件夹中的快捷方式路径"""
+        startup_folder = Path(os.path.expanduser(
+            "~\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+        ))
+        return startup_folder / "CameraCapture.lnk"
 
     def is_startup_enabled(self):
         """检查是否已设置开机启动"""
@@ -759,12 +792,8 @@ Set WshShell = Nothing
             return False
 
         try:
-            with self.get_startup_registry_key() as key:
-                try:
-                    winreg.QueryValueEx(key, "CameraCapture")
-                    return True
-                except WindowsError:
-                    return False
+            shortcut_path = self.get_startup_shortcut_path()
+            return shortcut_path.exists()
         except Exception as e:
             print(f"检查开机启动状态失败：{e}")
             return False
@@ -776,22 +805,34 @@ Set WshShell = Nothing
             return False
 
         try:
-            # 获取Python脚本的完整路径
-            script_path = os.path.abspath(__file__)
+            # 获取当前脚本路径
+            script_dir = Path(__file__).parent.absolute()
+            launcher_script = script_dir / "silent_launcher.py"
             python_exe = sys.executable
 
-            # 构建启动命令
-            if hidden:
-                # 隐藏窗口启动，使用VBScript
-                vbs_path = os.path.join(os.getcwd(), "start_camera_capture_hidden.vbs")
-                command = f'wscript "{vbs_path}"'
-            else:
-                # 可见窗口启动
-                command = f'"{python_exe}" "{script_path}"'
+            # 优先使用 pythonw.exe（无窗口版本）
+            pythonw_exe = python_exe.replace("python.exe", "pythonw.exe")
+            if not os.path.exists(pythonw_exe):
+                pythonw_exe = python_exe  # 如果没有pythonw.exe，使用python.exe
 
-            # 写入注册表
-            with self.get_startup_registry_key() as key:
-                winreg.SetValueEx(key, "CameraCapture", 0, winreg.REG_SZ, command)
+            # 创建启动快捷方式
+            shortcut_path = self.get_startup_shortcut_path()
+
+            # 使用win32com创建快捷方式
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(str(shortcut_path))
+
+            # 设置快捷方式属性
+            shortcut.TargetPath = pythonw_exe
+            shortcut.Arguments = f'"{launcher_script}"'
+            shortcut.WorkingDirectory = str(script_dir)
+            shortcut.Description = "摄像头抓拍工具"
+            shortcut.IconLocation = pythonw_exe
+            # 隐藏命令行窗口 (window style 0 = hidden)
+            shortcut.WindowStyle = 0
+
+            # 保存快捷方式
+            shortcut.save()
 
             startup_mode = "隐藏模式" if hidden else "可见模式"
             print(f"开机启动已启用 ({startup_mode})")
@@ -808,14 +849,14 @@ Set WshShell = Nothing
             return False
 
         try:
-            with self.get_startup_registry_key() as key:
-                try:
-                    winreg.DeleteValue(key, "CameraCapture")
-                    print("开机启动已禁用")
-                    return True
-                except WindowsError:
-                    print("开机启动项不存在")
-                    return False
+            shortcut_path = self.get_startup_shortcut_path()
+            if shortcut_path.exists():
+                os.remove(shortcut_path)
+                print("开机启动已禁用")
+                return True
+            else:
+                print("开机启动项不存在")
+                return False
         except Exception as e:
             print(f"禁用开机启动失败：{e}")
             return False
