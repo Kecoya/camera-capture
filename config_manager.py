@@ -7,6 +7,7 @@
 import json
 import os
 import sys
+import copy
 from datetime import time as dt_time
 from camera_capture import CameraCapture
 
@@ -18,6 +19,7 @@ class ConfigManager:
             "camera_id": 0,
             "temporary_dir": "temp_captures",
             "permanent_dir": "permanent_captures",
+            "gif_dir": "gif_animations",
             "time_ranges": [
                 {"start": "09:00", "end": "12:00", "interval": 30},
                 {"start": "14:00", "end": "18:00", "interval": 60}
@@ -28,7 +30,12 @@ class ConfigManager:
             ],
             "max_temp_captures": 1000,
             "auto_cleanup": True,
-            "cleanup_days": 7
+            "cleanup_days": 7,
+            "gif_fps": 24,
+            "enable_timestamp": True,
+            "timestamp_color": [0, 0, 255],
+            "timestamp_scale": 1.0,
+            "timestamp_thickness": 2
         }
 
     def show_menu(self):
@@ -66,14 +73,14 @@ class ConfigManager:
         """编辑配置"""
         if not os.path.exists(self.config_file):
             print("配置文件不存在，将创建新配置")
-            config = self.default_config.copy()
+            config = copy.deepcopy(self.default_config)
         else:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
             except Exception as e:
                 print(f"读取配置文件失败：{e}，使用默认配置")
-                config = self.default_config.copy()
+                config = copy.deepcopy(self.default_config)
 
         print("\n配置编辑（直接回车保持原值）：")
 
@@ -402,7 +409,7 @@ class ConfigManager:
         new_manager.config_file = filename
 
         # 使用默认配置
-        config = new_manager.default_config.copy()
+        config = copy.deepcopy(self.default_config)
 
         # 让用户选择是否立即编辑
         edit_now = input("是否立即编辑新配置？(y/n): ").strip().lower()

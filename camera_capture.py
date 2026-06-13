@@ -15,13 +15,13 @@ import argparse
 import time
 import json
 import threading
+import copy
 import sys
 import schedule
 from datetime import datetime, time as dt_time, timedelta
 import platform
 import subprocess
 import signal
-import win32com.client
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -29,6 +29,15 @@ import pystray
 from PIL import Image, ImageDraw
 import webbrowser
 import glob
+
+# Windows-only imports
+if platform.system().lower() == "windows":
+    try:
+        import win32com.client
+    except ImportError:
+        win32com = None
+else:
+    win32com = None
 
 
 class CameraCapture:
@@ -41,6 +50,7 @@ class CameraCapture:
         """
         self.config_file = config_file
         self.camera = None
+        self.camera_lock = threading.Lock()  # 摄像头操作锁，防止竞态条件
         self.is_running = False
         self.capture_threads = []
         self.schedule_threads = []
@@ -91,12 +101,12 @@ class CameraCapture:
                 return config
             except Exception as e:
                 print(f"加载配置文件失败：{e}，使用默认配置")
-                return self.default_config.copy()
+                return copy.deepcopy(self.default_config)
         else:
             # 创建默认配置文件
             self.save_config(self.default_config)
             print(f"已创建默认配置文件：{self.config_file}")
-            return self.default_config.copy()
+            return copy.deepcopy(self.default_config)
 
     def save_config(self, config=None):
         """保存配置文件"""
@@ -113,54 +123,57 @@ class CameraCapture:
             return False
 
     def initialize_camera(self):
-        """初始化摄像头"""
-        # 如果摄像头已经初始化，直接返回成功
-        if self.camera and self.camera.isOpened():
-            return True
+        """初始化摄像头（线程安全）"""
+        with self.camera_lock:
+            # 如果摄像头已经初始化，直接返回成功
+            if self.camera and self.camera.isOpened():
+                return True
 
-        try:
-            self.camera = cv2.VideoCapture(self.config["camera_id"])
-            if not self.camera.isOpened():
-                print(f"错误：无法打开摄像头 {self.config['camera_id']}")
+            try:
+                self.camera = cv2.VideoCapture(self.config["camera_id"])
+                if not self.camera.isOpened():
+                    print(f"错误：无法打开摄像头 {self.config['camera_id']}")
+                    self.camera = None
+                    return False
+
+                # 设置摄像头参数
+                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                self.camera.set(cv2.CAP_PROP_FPS, 30)
+
+                print(f"摄像头 {self.config['camera_id']} 初始化成功")
+                return True
+
+            except Exception as e:
+                print(f"摄像头初始化失败：{e}")
                 self.camera = None
                 return False
 
-            # 设置摄像头参数
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-            self.camera.set(cv2.CAP_PROP_FPS, 30)
-
-            print(f"摄像头 {self.config['camera_id']} 初始化成功")
-            return True
-
-        except Exception as e:
-            print(f"摄像头初始化失败：{e}")
-            self.camera = None
-            return False
-
     def release_camera(self):
-        """释放摄像头资源"""
-        if self.camera:
-            try:
-                self.camera.release()
-                print("摄像头资源已释放")
-            except Exception as e:
-                print(f"释放摄像头时出错：{e}")
-            finally:
-                self.camera = None
+        """释放摄像头资源（线程安全）"""
+        with self.camera_lock:
+            if self.camera:
+                try:
+                    self.camera.release()
+                    print("摄像头资源已释放")
+                except Exception as e:
+                    print(f"释放摄像头时出错：{e}")
+                finally:
+                    self.camera = None
 
     def capture_image(self):
-        """抓拍一张图片"""
-        if not self.camera or not self.camera.isOpened():
-            print("错误：摄像头未初始化")
-            return None
+        """抓拍一张图片（线程安全）"""
+        with self.camera_lock:
+            if not self.camera or not self.camera.isOpened():
+                print("错误：摄像头未初始化")
+                return None
 
-        ret, frame = self.camera.read()
-        if not ret:
-            print("错误：无法读取摄像头画面")
-            return None
+            ret, frame = self.camera.read()
+            if not ret:
+                print("错误：无法读取摄像头画面")
+                return None
 
-        return frame
+            return frame
 
     def add_timestamp(self, frame, timestamp=None):
         """
@@ -252,7 +265,10 @@ class CameraCapture:
         filepath = os.path.join(save_dir, filename)
 
         try:
-            cv2.imwrite(filepath, frame_with_timestamp)
+            success = cv2.imwrite(filepath, frame_with_timestamp)
+            if not success:
+                print(f"保存图片失败：cv2.imwrite 返回 False（路径：{filepath}）")
+                return None
             save_type = "永久" if is_permanent else "临时"
             print(f"{save_type}图片已保存：{filepath}")
             return filepath
@@ -584,15 +600,22 @@ class CameraCapture:
                         thread.start()
                         self.capture_threads.append(thread)
                 else:
-                    # 不在任何时间段内，确保摄像头已释放
-                    if self.camera:
+                    # 不在任何时间段内，且没有抓拍线程在运行时才释放摄像头
+                    any_capture_alive = any(t.is_alive() for t in self.capture_threads)
+                    if self.camera and not any_capture_alive:
                         print("当前不在抓拍时间段，释放摄像头资源")
                         self.release_camera()
 
+                # 清理已结束的线程，防止列表无限增长
+                self.capture_threads = [t for t in self.capture_threads if t.is_alive()]
+
                 # 定期清理过期文件（每小时一次）
                 current_min = datetime.now().minute
-                if current_min == 0:  # 整点时清理
+                if current_min == 0 and not getattr(self, '_cleanup_done_this_hour', False):
                     self.cleanup_old_files()
+                    self._cleanup_done_this_hour = True
+                elif current_min != 0:
+                    self._cleanup_done_this_hour = False
 
                 time.sleep(30)  # 每30秒检查一次时间段状态
 
@@ -606,6 +629,9 @@ class CameraCapture:
     def stop_capture(self):
         """停止抓拍并释放资源"""
         self.is_running = False
+
+        # 清理所有已注册的定时任务，防止重启时重复注册
+        schedule.clear()
 
         # 等待所有线程结束
         for thread in self.capture_threads + self.schedule_threads:
@@ -804,6 +830,10 @@ start /B "" "{python_exe}" "{script_path}" --hidden --config "{os.path.abspath(s
             print("开机启动功能仅支持Windows系统")
             return False
 
+        if win32com is None:
+            print("开机启动功能需要 pywin32 库，请运行：pip install pywin32")
+            return False
+
         try:
             # 获取当前脚本路径
             script_dir = Path(__file__).parent.absolute()
@@ -897,12 +927,15 @@ start /B "" "{python_exe}" "{script_path}" --hidden --config "{os.path.abspath(s
         def open_captured_folder(icon, item):
             """打开抓拍文件夹"""
             temp_dir = os.path.abspath(self.config["temporary_dir"])
-            perm_dir = os.path.abspath(self.config["permanent_dir"])
-            gif_dir = os.path.abspath(self.config["gif_dir"])
 
-            # 在资源管理器中打开临时文件夹
+            # 跨平台打开文件夹
             if os.path.exists(temp_dir):
-                os.startfile(temp_dir)
+                if platform.system().lower() == "windows":
+                    os.startfile(temp_dir)
+                elif platform.system().lower() == "darwin":
+                    subprocess.Popen(["open", temp_dir])
+                else:
+                    subprocess.Popen(["xdg-open", temp_dir])
 
         def toggle_startup(icon, item):
             """切换开机启动状态"""

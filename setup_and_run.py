@@ -7,6 +7,7 @@
 import os
 import sys
 import subprocess
+import platform
 import tkinter as tk
 from tkinter import ttk, messagebox
 import webbrowser
@@ -123,7 +124,12 @@ def main():
     def open_folder():
         """打开程序文件夹"""
         folder_path = os.path.dirname(__file__)
-        os.startfile(folder_path)
+        if platform.system().lower() == "windows":
+            os.startfile(folder_path)
+        elif platform.system().lower() == "darwin":
+            subprocess.Popen(["open", folder_path])
+        else:
+            subprocess.Popen(["xdg-open", folder_path])
 
     def manage_startup():
         """管理开机启动设置"""
