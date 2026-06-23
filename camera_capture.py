@@ -23,11 +23,7 @@ import platform
 import subprocess
 import signal
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-import pystray
-from PIL import Image, ImageDraw
-import webbrowser
+from PIL import Image
 import glob
 
 # Windows-only imports
@@ -54,9 +50,7 @@ class CameraCapture:
         self.is_running = False
         self.capture_threads = []
         self.schedule_threads = []
-        self.is_hidden = False
-        self.tray_icon = None
-        self.config_window = None
+        self.capture_generation = 0  # 抓拍代次，每次 start 递增，使旧线程及时退出
 
         # 默认配置
         self.default_config = {
@@ -476,7 +470,7 @@ class CameraCapture:
         except Exception as e:
             print(f"清理文件时出错：{e}")
 
-    def temporary_capture_worker(self, time_range):
+    def temporary_capture_worker(self, time_range, generation):
         """临时抓拍工作线程"""
         interval = time_range["interval"]
         capture_count = 0
@@ -492,7 +486,7 @@ class CameraCapture:
             return
 
         try:
-            while self.is_running:
+            while self.is_running and generation == self.capture_generation:
                 # 检查是否仍在时间段内
                 in_range, current_range = self.is_within_time_ranges()
                 if not in_range or current_range["start"] != time_range["start"]:
@@ -504,14 +498,23 @@ class CameraCapture:
                     print(f"已达到最大临时抓拍数量 {max_captures}")
                     break
 
+                # 确保摄像头仍可用（可能被预览/手动抓拍等其它路径释放过）
+                if not (self.camera and self.camera.isOpened()):
+                    if not self.initialize_camera():
+                        print(f"摄像头重新初始化失败，结束时间段 {time_range['start']}-{time_range['end']}")
+                        break
+
                 # 执行抓拍
                 frame = self.capture_image()
                 if frame is not None:
                     self.save_image(frame, is_permanent=False)
                     capture_count += 1
 
-                # 等待下一次抓拍
-                time.sleep(interval)
+                # 等待下一次抓拍（可中断：stop 或新一次 start 代次失配时及时退出）
+                slept = 0
+                while slept < interval and self.is_running and generation == self.capture_generation:
+                    time.sleep(0.5)
+                    slept += 0.5
 
         finally:
             # 时间段结束时释放摄像头
@@ -564,6 +567,9 @@ class CameraCapture:
 
     def start_all_capture(self):
         """启动所有抓拍任务"""
+        # 递增代次：让上一次启动遗留的调度循环/抓拍线程及时退出，避免重复抓拍
+        self.capture_generation += 1
+        gen = self.capture_generation
         self.is_running = True
 
         # 设置固定时间拍照
@@ -577,15 +583,16 @@ class CameraCapture:
         print("按 Ctrl+C 停止抓拍")
 
         try:
-            while self.is_running:
+            while self.is_running and gen == self.capture_generation:
                 # 检查是否在任何时间段内
                 in_range, time_range = self.is_within_time_ranges()
 
                 if in_range:
-                    # 检查是否已经有该时间段的线程在运行
+                    # 检查是否已经有该时间段、同代次的线程在运行
                     thread_already_running = any(
                         t.is_alive() for t in self.capture_threads
                         if hasattr(t, 'time_range_start') and t.time_range_start == time_range["start"]
+                        and getattr(t, 'generation', -1) == gen
                     )
 
                     if not thread_already_running:
@@ -593,10 +600,11 @@ class CameraCapture:
                         # 启动新的时间段抓拍线程
                         thread = threading.Thread(
                             target=self.temporary_capture_worker,
-                            args=(time_range,),
+                            args=(time_range, gen),
                             daemon=True
                         )
                         thread.time_range_start = time_range["start"]
+                        thread.generation = gen
                         thread.start()
                         self.capture_threads.append(thread)
                 else:
@@ -617,7 +625,11 @@ class CameraCapture:
                 elif current_min != 0:
                     self._cleanup_done_this_hour = False
 
-                time.sleep(30)  # 每30秒检查一次时间段状态
+                # 每30秒检查一次时间段状态（可中断，便于及时退出）
+                slept = 0
+                while slept < 30 and self.is_running and gen == self.capture_generation:
+                    time.sleep(0.5)
+                    slept += 0.5
 
         except KeyboardInterrupt:
             print("\n用户中断，停止抓拍")
@@ -670,7 +682,7 @@ After=network.target
 Type=simple
 User={os.getenv('USER', 'root')}
 WorkingDirectory={os.getcwd()}
-ExecStart={sys.executable} {os.path.abspath(__file__)} --config {self.config_file}
+ExecStart={sys.executable} {os.path.abspath(__file__)} --hidden --config {self.config_file}
 Restart=always
 RestartSec=10
 
@@ -707,6 +719,7 @@ WantedBy=multi-user.target
     <array>
         <string>{sys.executable}</string>
         <string>{os.path.abspath(__file__)}</string>
+        <string>--hidden</string>
         <string>--config</string>
         <string>{os.path.abspath(self.config_file)}</string>
     </array>
@@ -788,9 +801,8 @@ start /B "" "{python_exe}" "{script_path}" --hidden --config "{os.path.abspath(s
                 print("    （使用start /B命令实现后台运行）")
 
             print("\n要设置开机自启动，建议：")
-            print("1. 运行程序并打开配置窗口")
-            print("2. 在'启动设置'选项卡中勾选'开机自动启动'")
-            print("3. 选择启动模式（隐藏或可见）")
+            print("1. 运行程序（浏览器自动打开 Web 看板）")
+            print("2. 在'启动设置'选项卡中启用'开机自动启动'")
             print("\n或手动设置：")
             print("1. Win+R 打开运行对话框")
             print("2. 输入 shell:startup 并回车")
@@ -891,294 +903,31 @@ start /B "" "{python_exe}" "{script_path}" --hidden --config "{os.path.abspath(s
             print(f"禁用开机启动失败：{e}")
             return False
 
-    def create_tray_icon_image(self):
-        """创建托盘图标"""
-        # 创建一个简单的相机图标
-        image = Image.new('RGB', (64, 64), color='white')
-        draw = ImageDraw.Draw(image)
-
-        # 绘制简单的相机形状
-        draw.rectangle([10, 15, 54, 45], fill='black', outline='black')
-        draw.rectangle([20, 5, 44, 15], fill='black')
-        draw.ellipse([25, 20, 39, 34], fill='white', outline='black')
-        draw.ellipse([30, 25, 34, 29], fill='black')
-
-        return image
-
-    def setup_tray_icon(self):
-        """设置系统托盘图标"""
-        if self.tray_icon is not None:
-            return
-
-        def show_config(icon, item):
-            """显示配置窗口"""
-            self.show_config_window()
-
-        def toggle_capture(icon, item):
-            """切换抓拍状态"""
-            if self.is_running:
-                self.stop_capture()
-                icon.title = "摄像头抓拍 - 已停止"
-            else:
-                # 在新线程中启动抓拍
-                threading.Thread(target=self.start_all_capture, daemon=True).start()
-                icon.title = "摄像头抓拍 - 运行中"
-
-        def open_captured_folder(icon, item):
-            """打开抓拍文件夹"""
-            temp_dir = os.path.abspath(self.config["temporary_dir"])
-
-            # 跨平台打开文件夹
-            if os.path.exists(temp_dir):
-                if platform.system().lower() == "windows":
-                    os.startfile(temp_dir)
-                elif platform.system().lower() == "darwin":
-                    subprocess.Popen(["open", temp_dir])
-                else:
-                    subprocess.Popen(["xdg-open", temp_dir])
-
-        def toggle_startup(icon, item):
-            """切换开机启动状态"""
-            if self.is_startup_enabled():
-                if self.disable_startup():
-                    messagebox.showinfo("提示", "开机启动已禁用")
-                else:
-                    messagebox.showerror("错误", "禁用开机启动失败")
-            else:
-                if self.enable_startup(hidden=True):
-                    messagebox.showinfo("提示", "开机启动已启用（隐藏模式）")
-                else:
-                    messagebox.showerror("错误", "启用开机启动失败")
-
-        def quit_application(icon, item):
-            """退出应用程序"""
-            self.stop_capture()
-            icon.stop()
-
-        # 创建菜单
-        menu = pystray.Menu(
-            pystray.MenuItem("显示配置窗口", show_config),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("启动/停止抓拍", toggle_capture),
-            pystray.MenuItem("开机启动", toggle_startup,
-                           checked=lambda item: self.is_startup_enabled()),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("打开抓拍文件夹", open_captured_folder),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出", quit_application)
-        )
-
-        # 创建托盘图标
-        self.tray_icon = pystray.Icon(
-            "camera_capture",
-            self.create_tray_icon_image(),
-            "摄像头抓拍工具",
-            menu
-        )
-
-    def show_config_window(self):
-        """显示配置窗口"""
-        if self.config_window is not None:
-            self.config_window.lift()
-            self.config_window.focus()
-            return
-
-        self.config_window = tk.Tk()
-        self.config_window.title("摄像头抓拍工具配置")
-        self.config_window.geometry("600x500")
-        self.config_window.resizable(False, False)
-
-        # 创建笔记本（选项卡）
-        notebook = ttk.Notebook(self.config_window)
-        notebook.pack(fill='both', expand=True, padx=10, pady=10)
-
-        # 基本设置选项卡
-        basic_frame = ttk.Frame(notebook)
-        notebook.add(basic_frame, text="基本设置")
-
-        # 抓拍设置选项卡
-        capture_frame = ttk.Frame(notebook)
-        notebook.add(capture_frame, text="抓拍设置")
-
-        # 启动设置选项卡
-        startup_frame = ttk.Frame(notebook)
-        notebook.add(startup_frame, text="启动设置")
-
-        # 基本设置控件
-        ttk.Label(basic_frame, text="摄像头ID:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
-        camera_id_var = tk.IntVar(value=self.config["camera_id"])
-        ttk.Spinbox(basic_frame, from_=0, to=10, textvariable=camera_id_var, width=10).grid(row=0, column=1, padx=5, pady=5)
-
-        ttk.Label(basic_frame, text="临时照片目录:").grid(row=1, column=0, sticky='w', padx=5, pady=5)
-        temp_dir_var = tk.StringVar(value=self.config["temporary_dir"])
-        temp_frame = ttk.Frame(basic_frame)
-        temp_frame.grid(row=1, column=1, columnspan=2, sticky='ew', padx=5, pady=5)
-        ttk.Entry(temp_frame, textvariable=temp_dir_var, width=30).pack(side='left', fill='x', expand=True)
-        ttk.Button(temp_frame, text="浏览", command=lambda: self.browse_folder(temp_dir_var)).pack(side='right', padx=(5, 0))
-
-        ttk.Label(basic_frame, text="永久照片目录:").grid(row=2, column=0, sticky='w', padx=5, pady=5)
-        perm_dir_var = tk.StringVar(value=self.config["permanent_dir"])
-        perm_frame = ttk.Frame(basic_frame)
-        perm_frame.grid(row=2, column=1, columnspan=2, sticky='ew', padx=5, pady=5)
-        ttk.Entry(perm_frame, textvariable=perm_dir_var, width=30).pack(side='left', fill='x', expand=True)
-        ttk.Button(perm_frame, text="浏览", command=lambda: self.browse_folder(perm_dir_var)).pack(side='right', padx=(5, 0))
-
-        ttk.Label(basic_frame, text="GIF动图目录:").grid(row=3, column=0, sticky='w', padx=5, pady=5)
-        gif_dir_var = tk.StringVar(value=self.config["gif_dir"])
-        gif_frame = ttk.Frame(basic_frame)
-        gif_frame.grid(row=3, column=1, columnspan=2, sticky='ew', padx=5, pady=5)
-        ttk.Entry(gif_frame, textvariable=gif_dir_var, width=30).pack(side='left', fill='x', expand=True)
-        ttk.Button(gif_frame, text="浏览", command=lambda: self.browse_folder(gif_dir_var)).pack(side='right', padx=(5, 0))
-
-        ttk.Label(basic_frame, text="最大临时照片数:").grid(row=4, column=0, sticky='w', padx=5, pady=5)
-        max_temp_var = tk.IntVar(value=self.config.get("max_temp_captures", 1000))
-        ttk.Spinbox(basic_frame, from_=100, to=10000, textvariable=max_temp_var, width=10).grid(row=4, column=1, padx=5, pady=5)
-
-        ttk.Label(basic_frame, text="GIF帧率(FPS):").grid(row=5, column=0, sticky='w', padx=5, pady=5)
-        gif_fps_var = tk.IntVar(value=self.config.get("gif_fps", 24))
-        ttk.Spinbox(basic_frame, from_=1, to=30, textvariable=gif_fps_var, width=10).grid(row=5, column=1, padx=5, pady=5)
-
-        # 时间戳设置
-        ttk.Label(basic_frame, text="启用时间戳:").grid(row=6, column=0, sticky='w', padx=5, pady=5)
-        timestamp_enable_var = tk.BooleanVar(value=self.config.get("enable_timestamp", True))
-        ttk.Checkbutton(basic_frame, variable=timestamp_enable_var).grid(row=6, column=1, sticky='w', padx=5, pady=5)
-
-        ttk.Label(basic_frame, text="时间戳大小:").grid(row=7, column=0, sticky='w', padx=5, pady=5)
-        timestamp_scale_var = tk.DoubleVar(value=self.config.get("timestamp_scale", 1.0))
-        ttk.Spinbox(basic_frame, from_=0.5, to=3.0, increment=0.1, textvariable=timestamp_scale_var, width=10).grid(row=7, column=1, padx=5, pady=5)
-
-        # 启动设置控件
-        startup_status_var = tk.BooleanVar(value=self.is_startup_enabled())
-        ttk.Checkbutton(startup_frame, text="开机自动启动", variable=startup_status_var).grid(row=0, column=0, sticky='w', padx=5, pady=5)
-
-        hidden_startup_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(startup_frame, text="隐藏窗口启动", variable=hidden_startup_var).grid(row=1, column=0, sticky='w', padx=5, pady=5)
-
-        # 状态显示
-        status_frame = ttk.LabelFrame(startup_frame, text="当前状态")
-        status_frame.grid(row=2, column=0, columnspan=2, sticky='ew', padx=5, pady=10)
-
-        status_text = f"运行状态: {'运行中' if self.is_running else '已停止'}\n"
-        status_text += f"开机启动: {'已启用' if self.is_startup_enabled() else '已禁用'}"
-        ttk.Label(status_frame, text=status_text, justify='left').pack(padx=5, pady=5)
-
-        # 按钮框架
-        button_frame = ttk.Frame(self.config_window)
-        button_frame.pack(fill='x', padx=10, pady=10)
-
-        def save_config():
-            """保存配置"""
-            self.config["camera_id"] = camera_id_var.get()
-            self.config["temporary_dir"] = temp_dir_var.get()
-            self.config["permanent_dir"] = perm_dir_var.get()
-            self.config["gif_dir"] = gif_dir_var.get()
-            self.config["max_temp_captures"] = max_temp_var.get()
-            self.config["gif_fps"] = gif_fps_var.get()
-            self.config["enable_timestamp"] = timestamp_enable_var.get()
-            self.config["timestamp_scale"] = timestamp_scale_var.get()
-
-            # 重新创建目录（如果更改了目录）
-            os.makedirs(self.config["gif_dir"], exist_ok=True)
-
-            if self.save_config():
-                messagebox.showinfo("成功", "配置已保存")
-            else:
-                messagebox.showerror("错误", "配置保存失败")
-
-        def apply_startup_settings():
-            """应用启动设置"""
-            if startup_status_var.get():
-                if self.enable_startup(hidden=hidden_startup_var.get()):
-                    messagebox.showinfo("成功", f"开机启动已启用（{'隐藏' if hidden_startup_var.get() else '可见'}模式）")
-                else:
-                    messagebox.showerror("错误", "设置开机启动失败")
-            else:
-                if self.disable_startup():
-                    messagebox.showinfo("成功", "开机启动已禁用")
-                else:
-                    messagebox.showerror("错误", "禁用开机启动失败")
-
-        def start_hidden():
-            """隐藏窗口并最小化到托盘"""
-            self.config_window.withdraw()
-            if self.tray_icon is None:
-                self.setup_tray_icon()
-                threading.Thread(target=self.tray_icon.run, daemon=True).start()
-
-        ttk.Button(button_frame, text="保存配置", command=save_config).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="应用启动设置", command=apply_startup_settings).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="隐藏到托盘", command=start_hidden).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="关闭", command=self.config_window.destroy).pack(side='right', padx=5)
-
-        def on_closing():
-            """窗口关闭事件"""
-            self.config_window.destroy()
-            self.config_window = None
-
-        self.config_window.protocol("WM_DELETE_WINDOW", on_closing)
-        self.config_window.mainloop()
-
-    def browse_folder(self, var):
-        """浏览文件夹"""
-        folder = filedialog.askdirectory(initialdir=var.get())
-        if folder:
-            var.set(folder)
-
-    def run_with_tray(self):
-        """带托盘图标运行"""
-        self.setup_tray_icon()
-        self.tray_icon.run()
-
-    def run_hidden(self):
-        """隐藏模式运行"""
-        self.is_hidden = True
-        # 在新线程中启动抓拍
-        capture_thread = threading.Thread(target=self.start_all_capture, daemon=True)
-        capture_thread.start()
-
-        # 设置托盘图标
-        self.setup_tray_icon()
-        self.tray_icon.run()
-
-
-def parse_time_string(time_str):
-    """解析时间字符串"""
-    try:
-        hour, minute = map(int, time_str.split(':'))
-        return dt_time(hour, minute)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"无效的时间格式：{time_str}，请使用 HH:MM 格式")
-
 
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(
-        description="摄像头定时抓拍工具",
+        description="摄像头定时抓拍工具（Web 看板版）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例：
-  # 使用默认配置启动
+  # 启动 Web 看板（自动打开浏览器）
   python camera_capture.py
+
+  # 指定端口/绑定地址
+  python camera_capture.py --port 8080 --host 127.0.0.1
+
+  # 无头运行（不开浏览器，适合开机自启）
+  python camera_capture.py --no-browser
+  python camera_capture.py --hidden
 
   # 指定配置文件
   python camera_capture.py --config my_config.json
 
-  # 创建系统服务
+  # 创建系统服务 / 编辑配置 / 开机启动
   python camera_capture.py --create-service
-
-  # 编辑配置
   python camera_capture.py --edit-config
-
-  # 显示配置窗口
-  python camera_capture.py --gui
-
-  # 隐藏模式运行（最小化到托盘）
-  python camera_capture.py --hidden
-
-  # 启用开机启动
   python camera_capture.py --enable-startup
-
-  # 禁用开机启动
   python camera_capture.py --disable-startup
         """
     )
@@ -1188,6 +937,32 @@ def main():
         type=str,
         default='camera_config.json',
         help='配置文件路径，默认为camera_config.json'
+    )
+
+    parser.add_argument(
+        '--host',
+        type=str,
+        default='127.0.0.1',
+        help='Web 服务绑定地址，默认 127.0.0.1（仅本机访问）'
+    )
+
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=5000,
+        help='Web 服务端口，默认 5000'
+    )
+
+    parser.add_argument(
+        '--no-browser',
+        action='store_true',
+        help='启动后不自动打开浏览器'
+    )
+
+    parser.add_argument(
+        '--hidden', '--tray',
+        action='store_true',
+        help='无头模式运行（不打开浏览器，等价于 --no-browser，适合开机自启）'
     )
 
     parser.add_argument(
@@ -1203,33 +978,15 @@ def main():
     )
 
     parser.add_argument(
-        '--gui', '--config-window',
-        action='store_true',
-        help='显示图形配置窗口'
-    )
-
-    parser.add_argument(
-        '--hidden', '--tray',
-        action='store_true',
-        help='隐藏模式运行（最小化到系统托盘）'
-    )
-
-    parser.add_argument(
         '--enable-startup',
         action='store_true',
-        help='启用开机启动（默认隐藏模式）'
+        help='启用开机启动（无头 Web 服务）'
     )
 
     parser.add_argument(
         '--disable-startup',
         action='store_true',
         help='禁用开机启动'
-    )
-
-    parser.add_argument(
-        '--startup-visible',
-        action='store_true',
-        help='开机启动时显示窗口（与--enable-startup配合使用）'
     )
 
     args = parser.parse_args()
@@ -1239,10 +996,8 @@ def main():
 
     # 处理开机启动相关命令
     if args.enable_startup:
-        hidden_mode = not args.startup_visible
-        if capture_tool.enable_startup(hidden=hidden_mode):
-            mode_text = "隐藏模式" if hidden_mode else "可见模式"
-            print(f"开机启动已启用 ({mode_text})")
+        if capture_tool.enable_startup(hidden=True):
+            print("开机启动已启用（无头 Web 服务）")
         else:
             print("启用开机启动失败")
         return
@@ -1265,23 +1020,14 @@ def main():
         print(json.dumps(capture_tool.default_config, ensure_ascii=False, indent=2))
         return
 
-    if args.gui:
-        # 显示图形配置窗口
-        capture_tool.show_config_window()
-        return
-
-    if args.hidden:
-        # 隐藏模式运行
-        print("以隐藏模式启动...")
-        capture_tool.run_hidden()
-        return
-
-    # 默认启动抓拍任务
-    print("配置信息：")
-    print(json.dumps(capture_tool.config, ensure_ascii=False, indent=2))
-    print()
-
-    capture_tool.start_all_capture()
+    # 默认启动 Web 看板服务（延迟导入，避免与 web_app 的循环依赖）
+    from web_app import run_app
+    run_app(
+        capture_tool,
+        host=args.host,
+        port=args.port,
+        open_browser=not (args.no_browser or args.hidden),
+    )
 
 
 if __name__ == "__main__":

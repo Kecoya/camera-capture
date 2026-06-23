@@ -3,41 +3,33 @@
   "temporary_dir": "temp_captures",
   "permanent_dir": "permanent_captures",
   "gif_dir": "gif_animations",
-  "max_temp_captures": 1000,
-  "auto_cleanup": true,
-  "cleanup_days": 7,
   "time_ranges": [
     {
-      "start": "11:30",
-      "end": "14:30",
-      "interval": 60
+      "start": "09:00",
+      "end": "12:00",
+      "interval": 30
     },
     {
-      "start": "17:30",
-      "end": "18:30",
-      "interval": 60
-    },
-    {
-      "start": "21:30",
-      "end": "23:59",
+      "start": "14:00",
+      "end": "18:00",
       "interval": 60
     }
   ],
   "fixed_times": [
     {
-      "time": "08:50",
-      "description": "morning"
+      "time": "08:00",
+      "description": "早晨拍照"
     },
     {
-      "time": "14:50",
-      "description": "noon"
-    },
-    {
-      "time": "19:50",
-      "description": "night"
+      "time": "20:00",
+      "description": "晚上拍照"
     }
   ],
+  "max_temp_captures": 1000,
+  "auto_cleanup": true,
+  "cleanup_days": 7,
   "gif_fps": 24,
+  "gif_duration": 2.0,
   "enable_timestamp": true,
   "timestamp_color": [
     0,

@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>摄像头抓拍工具 · 看板</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📷 摄像头抓拍工具</div>
+    <div id="statusBar" class="status-bar">加载中…</div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="preview">实时预览</button>
+    <button class="tab-btn" data-tab="config">配置</button>
+    <button class="tab-btn" data-tab="control">控制</button>
+    <button class="tab-btn" data-tab="gallery">图片画廊</button>
+    <button class="tab-btn" data-tab="gif">GIF</button>
+    <button class="tab-btn" data-tab="startup">启动设置</button>
+  </nav>
+
+  <main class="content">
+    <!-- 实时预览 -->
+    <section id="tab-preview" class="tab-panel active">
+      <div class="preview-wrap">
+        <img id="preview" alt="实时预览" class="preview-img">
+        <div id="previewPlaceholder" class="preview-placeholder">点击「启动预览」查看实时画面</div>
+      </div>
+      <div class="actions">
+        <button id="btnPreviewStart" class="btn">启动预览</button>
+        <button id="btnPreviewStop" class="btn">停止预览</button>
+        <span id="previewState" class="hint"></span>
+      </div>
+    </section>
+
+    <!-- 配置 -->
+    <section id="tab-config" class="tab-panel">
+      <form id="configForm" class="config-form">
+        <fieldset>
+          <legend>基本设置</legend>
+          <label>摄像头ID <input type="number" name="camera_id" min="0" max="10"></label>
+          <label>临时照片目录 <input type="text" name="temporary_dir"></label>
+          <label>永久照片目录 <input type="text" name="permanent_dir"></label>
+          <label>GIF动图目录 <input type="text" name="gif_dir"></label>
+          <label>最大临时照片数 <input type="number" name="max_temp_captures" min="100" max="10000"></label>
+          <label>GIF帧率(FPS) <input type="number" name="gif_fps" min="1" max="30"></label>
+          <label>GIF时长(秒) <input type="number" name="gif_duration" min="0.5" max="10" step="0.5"></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>时间戳</legend>
+          <label class="checkbox"><input type="checkbox" name="enable_timestamp"> 启用时间戳</label>
+          <label>时间戳大小 <input type="number" name="timestamp_scale" min="0.5" max="3.0" step="0.1"></label>
+          <label>时间戳粗细 <input type="number" name="timestamp_thickness" min="1" max="10"></label>
+          <label>时间戳颜色(BGR) <span class="color-row">
+            <input type="number" name="ts_b" min="0" max="255" placeholder="B">
+            <input type="number" name="ts_g" min="0" max="255" placeholder="G">
+            <input type="number" name="ts_r" min="0" max="255" placeholder="R">
+          </span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>自动清理</legend>
+          <label class="checkbox"><input type="checkbox" name="auto_cleanup"> 启用自动清理</label>
+          <label>清理天数 <input type="number" name="cleanup_days" min="1" max="365"></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>抓拍时间段</legend>
+          <table class="dyn-table" id="timeRangesTable">
+            <thead><tr><th>开始</th><th>结束</th><th>间隔(秒)</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <button type="button" class="btn small" id="btnAddRange">＋ 添加时间段</button>
+        </fieldset>
+
+        <fieldset>
+          <legend>固定时间点</legend>
+          <table class="dyn-table" id="fixedTimesTable">
+            <thead><tr><th>时间</th><th>描述</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <button type="button" class="btn small" id="btnAddFixed">＋ 添加固定时间</button>
+        </fieldset>
+
+        <div class="actions">
+          <button type="submit" class="btn primary">保存配置</button>
+          <span id="configMsg" class="hint"></span>
+        </div>
+      </form>
+    </section>
+
+    <!-- 控制 -->
+    <section id="tab-control" class="tab-panel">
+      <div class="actions vertical">
+        <button id="btnManual" class="btn">立即抓拍一张</button>
+        <button id="btnCaptureStart" class="btn">启动定时抓拍</button>
+        <button id="btnCaptureStop" class="btn">停止定时抓拍</button>
+        <span id="controlMsg" class="hint"></span>
+      </div>
+    </section>
+
+    <!-- 图片画廊 -->
+    <section id="tab-gallery" class="tab-panel">
+      <div class="actions">
+        <label>类型
+          <select id="galleryType">
+            <option value="temp">临时照片</option>
+            <option value="permanent">永久照片</option>
+          </select>
+        </label>
+        <button id="btnGalleryRefresh" class="btn">刷新</button>
+        <span id="galleryInfo" class="hint"></span>
+      </div>
+      <div id="galleryGrid" class="gallery-grid"></div>
+      <div id="galleryPager" class="pager"></div>
+    </section>
+
+    <!-- GIF -->
+    <section id="tab-gif" class="tab-panel">
+      <div class="actions">
+        <button id="btnGifRefresh" class="btn">刷新</button>
+        <span id="gifInfo" class="hint"></span>
+      </div>
+      <div id="gifGrid" class="gallery-grid"></div>
+    </section>
+
+    <!-- 启动设置 -->
+    <section id="tab-startup" class="tab-panel">
+      <div class="card">
+        <p>开机启动状态：<strong id="startupStatus">未知</strong></p>
+        <div class="actions">
+          <button id="btnStartupEnable" class="btn">启用开机启动</button>
+          <button id="btnStartupDisable" class="btn">禁用开机启动</button>
+          <button id="btnShortcut" class="btn">创建桌面快捷方式</button>
+        </div>
+        <p class="hint">开机启动会以「无头 Web 服务」方式运行（无窗口、不开浏览器），开机后在浏览器访问 http://127.0.0.1:5000/ 即可。</p>
+        <span id="startupMsg" class="hint"></span>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <button id="btnShutdown" class="btn danger">退出服务</button>
+  </footer>
+
+  <!-- 灯箱 -->
+  <div id="lightbox" class="lightbox hidden">
+    <div class="lightbox-inner">
+      <img id="lightboxImg" alt="">
+      <div class="lightbox-tools">
+        <a id="lightboxDownload" class="btn" download>下载</a>
+        <button id="lightboxDelete" class="btn danger">删除</button>
+        <button id="lightboxClose" class="btn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局提示 -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
